@@ -91,14 +91,23 @@ def load_excel(file: FileLike, sheet_name: Optional[str] = None) -> pd.DataFrame
 
 
 def load_csv(file: FileLike) -> pd.DataFrame:
-    """Carga un CSV probando codificaciones comunes y auto-detectando el separador."""
+    """Carga un CSV probando codificaciones comunes, auto-detectando el separador y la fila de
+    encabezado real (un CSV exportado desde Excel puede conservar las mismas filas de título/banner
+    que un .xlsx, así que no se puede asumir `header=0`)."""
     encodings = ["utf-8", "utf-8-sig", "latin-1", "cp1252"]
     last_error: Exception | None = None
     for encoding in encodings:
         try:
             if hasattr(file, "seek"):
                 file.seek(0)
-            df = pd.read_csv(file, sep=None, engine="python", encoding=encoding)
+            raw = pd.read_csv(
+                file, sep=None, engine="python", encoding=encoding, header=None, nrows=MAX_HEADER_SCAN_ROWS
+            )
+            header_row = _detect_header_row(raw)
+
+            if hasattr(file, "seek"):
+                file.seek(0)
+            df = pd.read_csv(file, sep=None, engine="python", encoding=encoding, header=header_row)
             return _clean_dataframe(df)
         except (UnicodeDecodeError, pd.errors.ParserError) as exc:
             last_error = exc
