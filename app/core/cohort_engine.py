@@ -23,6 +23,7 @@ import re
 import numpy as np
 import pandas as pd
 
+from core import compatibility
 from utils.types import CohortConfig, ColumnType, EngineMode, Granularity
 
 _ORDINAL_NATIVE_TYPES = (
@@ -145,19 +146,20 @@ def compute_cohort_table(
                 "ordinal (no una categoría nominal sin orden)."
             )
 
-        # Si la cohorte ya tiene su propia escala ordinal (fecha, o periodo/numérica "nativa"), la
-        # observación debe compartir esa misma escala: restar un ordinal de fecha contra un valor
-        # numérico crudo (o viceversa) produce antigüedades sin sentido, aunque ambos tipos sean
-        # individualmente válidos. Ver `core.compatibility.compatible_observation_types`.
+        # Si la cohorte ya tiene su propia escala ordinal (fecha, periodo o numérica), la observación
+        # debe compartir esa misma escala: restar ordinales de familias distintas (p. ej. el ordinal
+        # interno de un periodo contra un valor numérico crudo) produce antigüedades sin sentido,
+        # aunque ambos tipos sean individualmente válidos. Se reutiliza la MISMA función que filtra
+        # las opciones en la UI (`core.compatibility`) para que ambas nunca puedan quedar desalineadas.
         if own_ordinal is not None:
-            cohort_family = ColumnType.FECHA if cohort_type == ColumnType.FECHA else "nativo"
-            obs_family = ColumnType.FECHA if obs_type == ColumnType.FECHA else "nativo"
+            cohort_family = compatibility.ordinal_family(cohort_type)
+            obs_family = compatibility.ordinal_family(obs_type)
             if cohort_family != obs_family:
                 raise ValueError(
                     f"La columna de cohorte ('{cohort_col}') y la de observación ('{obs_col}') usan "
-                    "escalas incompatibles (fecha vs. numérica/periodo): la antigüedad resultante no "
-                    "tendría significado. Elige una columna de observación del mismo tipo (ambas "
-                    "fecha, o ambas numérica/periodo)."
+                    "escalas incompatibles: la antigüedad resultante no tendría significado. Elige "
+                    "una columna de observación de la misma familia (fecha con fecha, periodo con "
+                    "periodo, o numérica con numérica)."
                 )
         result["observation_ordinal"] = obs_ordinal
 

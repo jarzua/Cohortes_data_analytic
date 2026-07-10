@@ -18,44 +18,55 @@ from dataclasses import dataclass, field
 from utils.types import ColumnType
 
 FECHA_FAMILY = "fecha"
-NATIVO_FAMILY = "nativo"
+PERIODO_FAMILY = "periodo"
+NUMERICO_FAMILY = "numerico"
 NOMINAL_FAMILY = "nominal"
 
 _FAMILY_BY_TYPE = {
     ColumnType.FECHA: FECHA_FAMILY,
-    ColumnType.PERIODO_ORDINAL: NATIVO_FAMILY,
-    ColumnType.NUMERICO_CATEGORICO: NATIVO_FAMILY,
-    ColumnType.NUMERICO_CONTINUO: NATIVO_FAMILY,
+    ColumnType.PERIODO_ORDINAL: PERIODO_FAMILY,
+    ColumnType.NUMERICO_CATEGORICO: NUMERICO_FAMILY,
+    ColumnType.NUMERICO_CONTINUO: NUMERICO_FAMILY,
     ColumnType.CATEGORICO: NOMINAL_FAMILY,
     ColumnType.BOOLEANO: NOMINAL_FAMILY,
     ColumnType.IDENTIFICADOR: NOMINAL_FAMILY,
 }
 
+# PERIODO_ORDINAL usa una codificación interna propia (año×ciclo+parte, ver
+# `cohort_engine._period_ordinal_key`) que NO está en la misma escala que un valor numérico crudo
+# (NUMERICO_CATEGORICO/NUMERICO_CONTINUO) aunque ambos sean "números" — restarlos entre sí da
+# antigüedades sin sentido (típicamente negativas y enormes, que además se descartan silenciosamente
+# por el guard de edad>=0, dejando la cohorte vacía). Por eso PERIODO_ORDINAL forma su propia familia,
+# separada de la familia "numérico" (NUMERICO_CATEGORICO ↔ NUMERICO_CONTINUO sí son compatibles entre
+# sí: ambos usan el valor crudo tal cual, sin transformación).
 _FECHA_TYPES = (ColumnType.FECHA,)
-_NATIVO_TYPES = (ColumnType.PERIODO_ORDINAL, ColumnType.NUMERICO_CATEGORICO, ColumnType.NUMERICO_CONTINUO)
-_ORDENADOS = _FECHA_TYPES + _NATIVO_TYPES
+_PERIODO_TYPES = (ColumnType.PERIODO_ORDINAL,)
+_NUMERICO_TYPES = (ColumnType.NUMERICO_CATEGORICO, ColumnType.NUMERICO_CONTINUO)
+_ORDENADOS = _FECHA_TYPES + _PERIODO_TYPES + _NUMERICO_TYPES
 _NOMINAL_TEMPORALMENTE_DEBIL = (ColumnType.CATEGORICO, ColumnType.BOOLEANO)
 
 
 def ordinal_family(col_type: ColumnType) -> str:
-    """A qué "escala" ordinal pertenece un tipo de columna: fecha, nativa (periodo/numérica) o nominal."""
+    """A qué "escala" ordinal pertenece un tipo de columna: fecha, periodo, numérica o nominal."""
     return _FAMILY_BY_TYPE.get(col_type, NOMINAL_FAMILY)
 
 
 def compatible_observation_types(cohort_type: ColumnType) -> tuple[ColumnType, ...]:
     """Tipos válidos para "Observación/Antigüedad" dado el tipo de la columna de Cohorte.
 
-    Si la cohorte ya tiene su propia escala ordinal (fecha, o periodo/numérica "nativa"), la
-    observación debe compartir esa misma escala — de lo contrario `edad = observación − cohorte`
-    resta unidades incompatibles (p. ej. un ordinal de mes contra un monto en pesos) y el resultado
+    Si la cohorte ya tiene su propia escala ordinal (fecha, periodo o numérica), la observación debe
+    compartir esa misma escala — de lo contrario `edad = observación − cohorte` resta unidades
+    incompatibles (p. ej. el ordinal interno de un periodo contra un semestre crudo) y el resultado
     no tiene sentido. Si la cohorte es nominal (sin escala propia, ej. Ciudad), cualquier columna
     ordenada sirve como observación, porque el origen se calcula por entidad, no por la cohorte.
     """
     family = ordinal_family(cohort_type)
     if family == FECHA_FAMILY:
         return _FECHA_TYPES
-    if family == NATIVO_FAMILY:
-        return _NATIVO_TYPES
+    if family == PERIODO_FAMILY:
+        return _PERIODO_TYPES
+    if family == NUMERICO_FAMILY:
+        return _NUMERICO_TYPES
     return _ORDENADOS
 
 

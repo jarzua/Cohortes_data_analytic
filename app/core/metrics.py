@@ -88,21 +88,32 @@ def build_count_matrix(tidy: pd.DataFrame, mode: EngineMode) -> pd.DataFrame:
     cohorts = _ordered_cohorts(tidy)
     ages = _age_range(tidy)
 
-    exact = (
-        tidy.groupby(["cohort_key", "age"])["entity_id"]
-        .nunique()
-        .unstack("age")
-        .reindex(index=cohorts, columns=ages)
-    )
-
     if mode == EngineMode.EVENTO:
+        exact = (
+            tidy.groupby(["cohort_key", "age"])["entity_id"]
+            .nunique()
+            .unstack("age")
+            .reindex(index=cohorts, columns=ages)
+        )
         # Una celda (cohorte, edad) sin ninguna entidad activa es 0% de retención, no "sin dato" —
         # pero solo para edades que la cohorte ya pudo alcanzar calendáricamente; las futuras siguen
         # censuradas (NaN) en vez de mostrarse como 0.
         return _apply_censoring(exact.fillna(0), tidy)
 
-    # Modo snapshot: "alcanzaron la edad N" = acumulado desde la edad máxima hacia atrás.
-    reached = exact.fillna(0).iloc[:, ::-1].cumsum(axis=1).iloc[:, ::-1]
+    # Modo snapshot: "alcanzaron la edad N" = entidades cuya antigüedad MÁXIMA alcanzada es >= N.
+    # Se reduce primero a una fila por (cohorte, entidad) con su edad máxima -- en el caso normal
+    # (una fila por entidad) esto es un no-op, pero si el motor se fuerza a Snapshot sobre datos que
+    # en realidad tienen varias filas por entidad, evita contar a la misma entidad más de una vez al
+    # acumular por edad (lo que antes inflaba el denominador y devolvía retenciones incorrectas).
+    max_age_per_entity = tidy.groupby(["cohort_key", "entity_id"])["age"].max().reset_index()
+    exact_max = (
+        max_age_per_entity.groupby(["cohort_key", "age"])["entity_id"]
+        .nunique()
+        .unstack("age")
+        .reindex(index=cohorts, columns=ages)
+        .fillna(0)
+    )
+    reached = exact_max.iloc[:, ::-1].cumsum(axis=1).iloc[:, ::-1]
     return _apply_censoring(reached, tidy)
 
 

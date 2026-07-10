@@ -119,12 +119,19 @@ TAB_LABELS = [
 if SHOW_METHODOLOGY_TAB:
     TAB_LABELS.append("📐 Metodología")
 
-tabs = dict(zip(TAB_LABELS, st.tabs(TAB_LABELS)))
+# Nota: se usa un selector (st.radio) en vez de st.tabs() para elegir la vista activa. La cantidad
+# de widgets dentro de "Configuración" cambia dinámicamente entre reruns (mapeo de estado, filtros,
+# granularidad condicional...), y eso desestabiliza la reconciliación del árbol de st.tabs() en el
+# frontend: tras cambiar una selección, el contenido de todas las vistas queda apilado en una sola
+# página en vez de aislado por pestaña. Con renderizado condicional explícito (if/elif) solo se
+# ejecuta y dibuja el código de la vista activa, sin depender de que el frontend oculte las demás.
+selected_view = st.radio("Vista", options=TAB_LABELS, horizontal=True, label_visibility="collapsed")
+st.divider()
 
 # ---------------------------------------------------------------------------
-# Tab 1: Datos
+# Vista: Datos
 # ---------------------------------------------------------------------------
-with tabs["📂 Datos"]:
+if selected_view == "📂 Datos":
     st.header("Estructura del Dataset")
     profiles = profiling.build_column_profiles(df, types)
     st.dataframe(profiling.dataset_summary_table(profiles), use_container_width=True)
@@ -146,9 +153,9 @@ with tabs["📂 Datos"]:
     st.dataframe(df.head(50), use_container_width=True)
 
 # ---------------------------------------------------------------------------
-# Tab 2: Configuración
+# Vista: Configuración
 # ---------------------------------------------------------------------------
-with tabs["⚙️ Configuración"]:
+if selected_view == "⚙️ Configuración":
     st.header("Configuración del Análisis de Cohortes")
 
     cohort_options = _options_for(types, COHORT_COLUMN_TYPES)
@@ -346,9 +353,9 @@ with tabs["⚙️ Configuración"]:
 result = st.session_state.get("result")
 
 # ---------------------------------------------------------------------------
-# Tab 3: Matriz de Cohortes
+# Vista: Matriz de Cohortes
 # ---------------------------------------------------------------------------
-with tabs["🔢 Matriz de Cohortes"]:
+if selected_view == "🔢 Matriz de Cohortes":
     st.header("Matriz de Cohortes")
     if result is None:
         st.info("Configura y genera el análisis en la pestaña ⚙️ Configuración.")
@@ -383,9 +390,9 @@ with tabs["🔢 Matriz de Cohortes"]:
         )
 
 # ---------------------------------------------------------------------------
-# Tab 4: Retención y Abandono
+# Vista: Retención y Abandono
 # ---------------------------------------------------------------------------
-with tabs["📈 Retención y Abandono"]:
+if selected_view == "📈 Retención y Abandono":
     st.header("Retención y Abandono")
     if result is None:
         st.info("Configura y genera el análisis en la pestaña ⚙️ Configuración.")
@@ -411,9 +418,9 @@ with tabs["📈 Retención y Abandono"]:
             )
 
 # ---------------------------------------------------------------------------
-# Tab 5: Dashboard Ejecutivo
+# Vista: Dashboard Ejecutivo
 # ---------------------------------------------------------------------------
-with tabs["📊 Dashboard Ejecutivo"]:
+if selected_view == "📊 Dashboard Ejecutivo":
     st.header("Dashboard Ejecutivo")
     if result is None:
         st.info("Configura y genera el análisis en la pestaña ⚙️ Configuración.")
@@ -442,9 +449,9 @@ with tabs["📊 Dashboard Ejecutivo"]:
             st.dataframe(summary_df.style.format(format_pct), use_container_width=True)
 
 # ---------------------------------------------------------------------------
-# Tab 6: Insights
+# Vista: Insights
 # ---------------------------------------------------------------------------
-with tabs["🧠 Insights"]:
+if selected_view == "🧠 Insights":
     st.header("Insights Automáticos")
     if result is None:
         st.info("Configura y genera el análisis en la pestaña ⚙️ Configuración.")
@@ -459,63 +466,62 @@ with tabs["🧠 Insights"]:
             st.markdown("---")
 
 # ---------------------------------------------------------------------------
-# Tab 7: Metodología (oculta temporalmente, ver SHOW_METHODOLOGY_TAB)
+# Vista: Metodología (oculta temporalmente, ver SHOW_METHODOLOGY_TAB)
 # ---------------------------------------------------------------------------
-if SHOW_METHODOLOGY_TAB:
-    with tabs["📐 Metodología"]:
-        st.header("Metodología: cómo se calcula cada número")
+if SHOW_METHODOLOGY_TAB and selected_view == "📐 Metodología":
+    st.header("Metodología: cómo se calcula cada número")
 
-        st.subheader("1. Asignación de cohorte")
-        st.markdown(
-            "- **Columna de fecha**: se trunca a la granularidad elegida "
-            "(día, semana, mes, trimestre, semestre o año).\n"
-            "- **Columna de periodo** (ej. `2025-2`) o **numérica categórica** (ej. Semestre): se usa "
-            "el valor directamente, con un orden numérico inferido automáticamente.\n"
-            "- **Columna categórica** (ej. Ciudad): se usa el valor tal cual, sin orden temporal propio."
-        )
+    st.subheader("1. Asignación de cohorte")
+    st.markdown(
+        "- **Columna de fecha**: se trunca a la granularidad elegida "
+        "(día, semana, mes, trimestre, semestre o año).\n"
+        "- **Columna de periodo** (ej. `2025-2`) o **numérica categórica** (ej. Semestre): se usa "
+        "el valor directamente, con un orden numérico inferido automáticamente.\n"
+        "- **Columna categórica** (ej. Ciudad): se usa el valor tal cual, sin orden temporal propio."
+    )
 
-        st.subheader("2. Antigüedad (edad de la cohorte)")
-        st.latex(r"\text{edad} = \text{ordinal}(\text{observación}) - \text{ordinal}(\text{inicio de la entidad})")
-        st.markdown(
-            "El inicio de cada **entidad** es el mínimo valor ordinal alcanzado en cualquiera de sus "
-            "filas (su primera aparición), no el valor de cada fila individual — así una misma entidad "
-            "permanece en su cohorte de origen a lo largo de toda su historia. Si no hay columna de "
-            "observación, la edad es 0 para todos los registros (comparación estática, sin evolución)."
-        )
+    st.subheader("2. Antigüedad (edad de la cohorte)")
+    st.latex(r"\text{edad} = \text{ordinal}(\text{observación}) - \text{ordinal}(\text{inicio de la entidad})")
+    st.markdown(
+        "El inicio de cada **entidad** es el mínimo valor ordinal alcanzado en cualquiera de sus "
+        "filas (su primera aparición), no el valor de cada fila individual — así una misma entidad "
+        "permanece en su cohorte de origen a lo largo de toda su historia. Si no hay columna de "
+        "observación, la edad es 0 para todos los registros (comparación estática, sin evolución)."
+    )
 
-        st.subheader("3. Modo del motor")
-        st.markdown(
-            "- **Evento** (log de actividad, varias filas por entidad): "
-            r"$\text{retención}(C, N) = \dfrac{\#\text{entidades distintas con edad} = N}{\#\text{entidades distintas con edad} = 0}$"
-            "\n- **Snapshot** (una fila por entidad, antigüedad actual): "
-            r"$\text{retención}(C, N) = \dfrac{\#\text{entidades con edad} \geq N}{\#\text{entidades en la cohorte}}$"
-        )
-        st.markdown(
-            "El modo se detecta automáticamente: si el ID de entidad se repite en más de una fila, es "
-            "Evento; si cada entidad aparece una sola vez (o no hay ID de entidad), es Snapshot."
-        )
+    st.subheader("3. Modo del motor")
+    st.markdown(
+        "- **Evento** (log de actividad, varias filas por entidad): "
+        r"$\text{retención}(C, N) = \dfrac{\#\text{entidades distintas con edad} = N}{\#\text{entidades distintas con edad} = 0}$"
+        "\n- **Snapshot** (una fila por entidad, antigüedad actual): "
+        r"$\text{retención}(C, N) = \dfrac{\#\text{entidades con edad} \geq N}{\#\text{entidades en la cohorte}}$"
+    )
+    st.markdown(
+        "El modo se detecta automáticamente: si el ID de entidad se repite en más de una fila, es "
+        "Evento; si cada entidad aparece una sola vez (o no hay ID de entidad), es Snapshot."
+    )
 
-        st.subheader("4. Censura por tiempo insuficiente")
-        st.markdown(
-            "En ambos modos, una celda (cohorte, edad=N) se marca como **N/A** — no como 0% — cuando "
-            "la cohorte, dado su punto de arranque, todavía no pudo alcanzar calendáricamente esa edad "
-            "(por ejemplo, una cohorte de este mes no puede tener 6 meses de antigüedad todavía). Se "
-            "calcula comparando N contra la edad máxima posible = edad de la observación más reciente "
-            "del dataset menos el inicio de esa cohorte."
-        )
+    st.subheader("4. Censura por tiempo insuficiente")
+    st.markdown(
+        "En ambos modos, una celda (cohorte, edad=N) se marca como **N/A** — no como 0% — cuando "
+        "la cohorte, dado su punto de arranque, todavía no pudo alcanzar calendáricamente esa edad "
+        "(por ejemplo, una cohorte de este mes no puede tener 6 meses de antigüedad todavía). Se "
+        "calcula comparando N contra la edad máxima posible = edad de la observación más reciente "
+        "del dataset menos el inicio de esa cohorte."
+    )
 
-        st.subheader("5. Abandono y Conversión")
-        st.markdown(
-            "- **Abandono (curva)** $= 1 - \\text{retención}$, edad a edad.\n"
-            "- **Abandono / Conversión basados en estado** (si se mapea una columna de estado): cada "
-            "valor único se asigna a un bucket (Retenido, Convertido, Abandono, Pendiente, Ignorar) y se "
-            "calcula el % de entidades de la cohorte en cada bucket."
-        )
+    st.subheader("5. Abandono y Conversión")
+    st.markdown(
+        "- **Abandono (curva)** $= 1 - \\text{retención}$, edad a edad.\n"
+        "- **Abandono / Conversión basados en estado** (si se mapea una columna de estado): cada "
+        "valor único se asigna a un bucket (Retenido, Convertido, Abandono, Pendiente, Ignorar) y se "
+        "calcula el % de entidades de la cohorte en cada bucket."
+    )
 
-        st.subheader("6. Insights automáticos")
-        st.markdown(
-            "Reglas deterministas, no modelos de machine learning: ranking de cohortes por retención "
-            "promedio, pendiente de una regresión lineal simple (`numpy.polyfit`) sobre el tamaño y la "
-            "retención de cohortes sucesivas para detectar tendencias, y z-score sobre la retención "
-            "promedio de cada cohorte para marcar anomalías (|z| > 2)."
-        )
+    st.subheader("6. Insights automáticos")
+    st.markdown(
+        "Reglas deterministas, no modelos de machine learning: ranking de cohortes por retención "
+        "promedio, pendiente de una regresión lineal simple (`numpy.polyfit`) sobre el tamaño y la "
+        "retención de cohortes sucesivas para detectar tendencias, y z-score sobre la retención "
+        "promedio de cada cohorte para marcar anomalías (|z| > 2)."
+    )
