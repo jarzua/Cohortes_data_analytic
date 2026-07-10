@@ -10,7 +10,7 @@ import io
 import pandas as pd
 import streamlit as st
 
-from core import cohort_engine, data_loader, filters, insights, metrics, profiling, visualizations
+from core import cohort_engine, compatibility, data_loader, filters, insights, metrics, profiling, visualizations
 from utils.formatting import format_number, format_pct
 from utils.types import (
     AggregationType,
@@ -24,6 +24,8 @@ from utils.types import (
 )
 
 st.set_page_config(page_title="Motor Universal de Cohortes", page_icon="📊", layout="wide")
+
+SHOW_METHODOLOGY_TAB = False  # oculta temporalmente la pestaña "📐 Metodología"; el contenido queda intacto más abajo
 
 NONE_LABEL = "(Ninguno)"
 COHORT_COLUMN_TYPES = (
@@ -59,7 +61,7 @@ def _guess_bucket(value: object) -> StatusBucket:
     return StatusBucket.IGNORAR
 
 
-@st.cache_data(show_spinner="Cargando y perfilando el archivo...")
+@st.cache_data(show_spinner="Cargando y perfilando el archivo...", max_entries=5)
 def _load_and_profile(file_bytes: bytes, filename: str, sheet_name: str | None):
     buffer = io.BytesIO(file_bytes)
     df = data_loader.load_dataset(buffer, filename, sheet_name=sheet_name)
@@ -88,38 +90,41 @@ if uploaded_file is None:
     st.stop()
 
 file_bytes = uploaded_file.getvalue()
-sheet_name = None
-if data_loader.is_excel(uploaded_file.name):
-    sheets = data_loader.list_sheets(io.BytesIO(file_bytes))
-    if len(sheets) > 1:
-        sheet_name = st.sidebar.selectbox("Hoja de Excel", options=sheets)
-    else:
-        sheet_name = sheets[0]
-
 try:
+    sheet_name = None
+    if data_loader.is_excel(uploaded_file.name):
+        sheets = data_loader.list_sheets(io.BytesIO(file_bytes))
+        if len(sheets) > 1:
+            sheet_name = st.sidebar.selectbox("Hoja de Excel", options=sheets)
+        else:
+            sheet_name = sheets[0]
     df, types = _load_and_profile(file_bytes, uploaded_file.name, sheet_name)
-except ValueError as exc:
+except Exception as exc:
+    # Frontera de E/S: un archivo corrupto, sin motor instalado (ImportError), un zip inválido, etc.
+    # puede lanzar excepciones de muchos tipos distintos según el motor (openpyxl/xlrd) — se capturan
+    # todas aquí para mostrar un mensaje legible en vez de tumbar el script de Streamlit.
     st.error(f"No se pudo cargar el archivo: {exc}")
     st.stop()
 
 st.sidebar.success(f"{df.shape[0]:,} filas × {df.shape[1]} columnas cargadas.")
 
-tabs = st.tabs(
-    [
-        "📂 Datos",
-        "⚙️ Configuración",
-        "🔢 Matriz de Cohortes",
-        "📈 Retención y Abandono",
-        "📊 Dashboard Ejecutivo",
-        "🧠 Insights",
-        "📐 Metodología",
-    ]
-)
+TAB_LABELS = [
+    "📂 Datos",
+    "⚙️ Configuración",
+    "🔢 Matriz de Cohortes",
+    "📈 Retención y Abandono",
+    "📊 Dashboard Ejecutivo",
+    "🧠 Insights",
+]
+if SHOW_METHODOLOGY_TAB:
+    TAB_LABELS.append("📐 Metodología")
+
+tabs = dict(zip(TAB_LABELS, st.tabs(TAB_LABELS)))
 
 # ---------------------------------------------------------------------------
 # Tab 1: Datos
 # ---------------------------------------------------------------------------
-with tabs[0]:
+with tabs["📂 Datos"]:
     st.header("Estructura del Dataset")
     profiles = profiling.build_column_profiles(df, types)
     st.dataframe(profiling.dataset_summary_table(profiles), use_container_width=True)
@@ -143,7 +148,7 @@ with tabs[0]:
 # ---------------------------------------------------------------------------
 # Tab 2: Configuración
 # ---------------------------------------------------------------------------
-with tabs[1]:
+with tabs["⚙️ Configuración"]:
     st.header("Configuración del Análisis de Cohortes")
 
     cohort_options = _options_for(types, COHORT_COLUMN_TYPES)
@@ -153,29 +158,31 @@ with tabs[1]:
         )
         st.stop()
 
+    # La columna de Cohorte se elige primero: de su tipo depende qué columnas tiene sentido ofrecer
+    # como Observación (misma escala ordinal) y si la Granularidad temporal aplica o no. Mostrar solo
+    # las combinaciones compatibles evita tanto configuraciones sin sentido analítico como mezclas
+    # matemáticamente inválidas (fecha vs. valor numérico crudo).
+    cohort_column = st.selectbox(
+        "Columna de Cohorte",
+        options=cohort_options,
+        help="Fecha (se truncará a la granularidad elegida), periodo (ej. '2025-2') o categoría "
+        "(ej. Ciudad, Programa) que define a qué cohorte pertenece cada registro.",
+    )
+    cohort_type = types[cohort_column]
+
     c1, c2 = st.columns(2)
     with c1:
-        cohort_column = st.selectbox(
-            "Columna de Cohorte",
-            options=cohort_options,
-            help="Fecha (se truncará a la granularidad elegida), periodo (ej. '2025-2') o categoría "
-            "(ej. Ciudad, Programa) que define a qué cohorte pertenece cada registro.",
-        )
-        granularity = st.selectbox(
-            "Granularidad temporal",
-            options=list(Granularity),
-            index=list(Granularity).index(Granularity.MES),
-            format_func=lambda g: g.value,
-            help="Solo aplica cuando la columna de cohorte u observación es una fecha.",
-        )
-    with c2:
-        obs_options = [NONE_LABEL] + _options_for(types, OBSERVATION_COLUMN_TYPES)
+        compatible_types = compatibility.compatible_observation_types(cohort_type)
+        obs_options = [NONE_LABEL] + _options_for(types, compatible_types)
         observation_column = st.selectbox(
             "Columna de Observación / Antigüedad",
             options=obs_options,
-            help="Fecha o periodo que se compara contra el inicio de la cohorte para calcular la "
-            "antigüedad. Si se omite, no habrá evolución temporal (solo comparación estática).",
+            help="Se compara contra el inicio de la cohorte para calcular la antigüedad. Solo se "
+            "muestran columnas compatibles con la escala de la cohorte elegida. Si se omite, no habrá "
+            "evolución temporal (solo comparación estática).",
         )
+        observation_type = None if observation_column == NONE_LABEL else types[observation_column]
+    with c2:
         entity_options = [NONE_LABEL] + list(df.columns)
         default_entity = next((c for c, t in types.items() if t == ColumnType.IDENTIFICADOR), NONE_LABEL)
         entity_id_column = st.selectbox(
@@ -185,6 +192,17 @@ with tabs[1]:
             help="Si se indica, la retención se calcula sobre entidades distintas; si no, sobre "
             "conteo de registros.",
         )
+
+    if compatibility.granularity_is_relevant(cohort_type, observation_type):
+        granularity = st.selectbox(
+            "Granularidad temporal",
+            options=list(Granularity),
+            index=list(Granularity).index(Granularity.MES),
+            format_func=lambda g: g.value,
+        )
+    else:
+        granularity = Granularity.MES
+        st.caption("⏱️ Granularidad temporal: no aplica (ni la cohorte ni la observación son fechas).")
 
     mode_override_label = st.radio(
         "Modo del motor",
@@ -255,6 +273,18 @@ with tabs[1]:
         filter_selections = filters.render_filters(df, types)
 
     st.divider()
+    quality = compatibility.evaluate_selection(
+        cohort_column=cohort_column,
+        cohort_type=cohort_type,
+        observation_column=None if observation_column == NONE_LABEL else observation_column,
+        entity_id_column=None if entity_id_column == NONE_LABEL else entity_id_column,
+        metric_column=None if metric_column == NONE_LABEL else metric_column,
+        metric_type=None if metric_column == NONE_LABEL else types[metric_column],
+    )
+    st.markdown(f"**{quality.icono} Calidad de la configuración: {quality.resumen}**")
+    for razon in quality.razones:
+        st.caption(f"· {razon}")
+
     if st.button("🚀 Generar Análisis", type="primary", use_container_width=True):
         filtered_df = filters.apply_filters(df, filter_selections)
         if filtered_df.empty:
@@ -272,16 +302,12 @@ with tabs[1]:
             )
             try:
                 tidy = cohort_engine.compute_cohort_table(filtered_df, types, config)
-            except ValueError as exc:
-                st.error(f"No se pudo generar el análisis: {exc}")
-                tidy = pd.DataFrame()
-
-            if tidy.empty:
-                st.error(
-                    "No se pudo construir la tabla de cohortes: revisa que las columnas elegidas "
-                    "tengan datos válidos y compatibles entre sí."
-                )
-            else:
+                if tidy.empty:
+                    raise ValueError(
+                        "No quedó ningún registro válido: revisa que las columnas elegidas tengan "
+                        "datos válidos y compatibles entre sí (fechas parseables, antigüedad no "
+                        "negativa, etc.)."
+                    )
                 mode = cohort_engine.detect_engine_mode(filtered_df, config)
                 counts = metrics.build_count_matrix(tidy, mode)
                 retention = metrics.retention_matrix(tidy, mode)
@@ -292,13 +318,14 @@ with tabs[1]:
                     else pd.DataFrame()
                 )
                 kpis = metrics.executive_kpis(tidy, mode)
-                conversion = metrics.conversion_rates(tidy) if config.status_mapping else pd.Series(dtype=float)
-                abandono_status = (
-                    metrics.abandono_rates(tidy) if config.status_mapping else pd.Series(dtype=float)
-                )
-                status_summary_df = (
-                    metrics.status_summary(tidy) if config.status_mapping else pd.DataFrame()
-                )
+                if config.status_mapping:
+                    status_summary_df = metrics.status_summary(tidy)
+                    conversion = metrics.conversion_rates(status_summary_df)
+                    abandono_status = metrics.abandono_rates(status_summary_df)
+                else:
+                    status_summary_df = pd.DataFrame()
+                    conversion = pd.Series(dtype=float)
+                    abandono_status = pd.Series(dtype=float)
                 st.session_state["result"] = dict(
                     tidy=tidy,
                     mode=mode,
@@ -313,13 +340,15 @@ with tabs[1]:
                     config=config,
                 )
                 st.success(f"Análisis generado: {len(counts.index)} cohortes · modo detectado: {mode.value}.")
+            except ValueError as exc:
+                st.error(f"No se pudo generar el análisis: {exc}")
 
 result = st.session_state.get("result")
 
 # ---------------------------------------------------------------------------
 # Tab 3: Matriz de Cohortes
 # ---------------------------------------------------------------------------
-with tabs[2]:
+with tabs["🔢 Matriz de Cohortes"]:
     st.header("Matriz de Cohortes")
     if result is None:
         st.info("Configura y genera el análisis en la pestaña ⚙️ Configuración.")
@@ -356,7 +385,7 @@ with tabs[2]:
 # ---------------------------------------------------------------------------
 # Tab 4: Retención y Abandono
 # ---------------------------------------------------------------------------
-with tabs[3]:
+with tabs["📈 Retención y Abandono"]:
     st.header("Retención y Abandono")
     if result is None:
         st.info("Configura y genera el análisis en la pestaña ⚙️ Configuración.")
@@ -384,14 +413,14 @@ with tabs[3]:
 # ---------------------------------------------------------------------------
 # Tab 5: Dashboard Ejecutivo
 # ---------------------------------------------------------------------------
-with tabs[4]:
+with tabs["📊 Dashboard Ejecutivo"]:
     st.header("Dashboard Ejecutivo")
     if result is None:
         st.info("Configura y genera el análisis en la pestaña ⚙️ Configuración.")
     else:
         kpis = result["kpis"]
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total de registros", format_number(kpis.get("total_registros")))
+        c1.metric("Total de entidades", format_number(kpis.get("total_entidades")))
         c2.metric("Cohortes activas", kpis.get("cohortes_activas", 0))
         c3.metric("Retención promedio", format_pct(kpis.get("retencion_promedio")))
         c4.metric("Abandono promedio", format_pct(kpis.get("abandono_promedio")))
@@ -415,7 +444,7 @@ with tabs[4]:
 # ---------------------------------------------------------------------------
 # Tab 6: Insights
 # ---------------------------------------------------------------------------
-with tabs[5]:
+with tabs["🧠 Insights"]:
     st.header("Insights Automáticos")
     if result is None:
         st.info("Configura y genera el análisis en la pestaña ⚙️ Configuración.")
@@ -430,62 +459,63 @@ with tabs[5]:
             st.markdown("---")
 
 # ---------------------------------------------------------------------------
-# Tab 7: Metodología
+# Tab 7: Metodología (oculta temporalmente, ver SHOW_METHODOLOGY_TAB)
 # ---------------------------------------------------------------------------
-with tabs[6]:
-    st.header("Metodología: cómo se calcula cada número")
+if SHOW_METHODOLOGY_TAB:
+    with tabs["📐 Metodología"]:
+        st.header("Metodología: cómo se calcula cada número")
 
-    st.subheader("1. Asignación de cohorte")
-    st.markdown(
-        "- **Columna de fecha**: se trunca a la granularidad elegida "
-        "(día, semana, mes, trimestre, semestre o año).\n"
-        "- **Columna de periodo** (ej. `2025-2`) o **numérica categórica** (ej. Semestre): se usa "
-        "el valor directamente, con un orden numérico inferido automáticamente.\n"
-        "- **Columna categórica** (ej. Ciudad): se usa el valor tal cual, sin orden temporal propio."
-    )
+        st.subheader("1. Asignación de cohorte")
+        st.markdown(
+            "- **Columna de fecha**: se trunca a la granularidad elegida "
+            "(día, semana, mes, trimestre, semestre o año).\n"
+            "- **Columna de periodo** (ej. `2025-2`) o **numérica categórica** (ej. Semestre): se usa "
+            "el valor directamente, con un orden numérico inferido automáticamente.\n"
+            "- **Columna categórica** (ej. Ciudad): se usa el valor tal cual, sin orden temporal propio."
+        )
 
-    st.subheader("2. Antigüedad (edad de la cohorte)")
-    st.latex(r"\text{edad} = \text{ordinal}(\text{observación}) - \text{ordinal}(\text{inicio de la entidad})")
-    st.markdown(
-        "El inicio de cada **entidad** es el mínimo valor ordinal alcanzado en cualquiera de sus "
-        "filas (su primera aparición), no el valor de cada fila individual — así una misma entidad "
-        "permanece en su cohorte de origen a lo largo de toda su historia. Si no hay columna de "
-        "observación, la edad es 0 para todos los registros (comparación estática, sin evolución)."
-    )
+        st.subheader("2. Antigüedad (edad de la cohorte)")
+        st.latex(r"\text{edad} = \text{ordinal}(\text{observación}) - \text{ordinal}(\text{inicio de la entidad})")
+        st.markdown(
+            "El inicio de cada **entidad** es el mínimo valor ordinal alcanzado en cualquiera de sus "
+            "filas (su primera aparición), no el valor de cada fila individual — así una misma entidad "
+            "permanece en su cohorte de origen a lo largo de toda su historia. Si no hay columna de "
+            "observación, la edad es 0 para todos los registros (comparación estática, sin evolución)."
+        )
 
-    st.subheader("3. Modo del motor")
-    st.markdown(
-        "- **Evento** (log de actividad, varias filas por entidad): "
-        r"$\text{retención}(C, N) = \dfrac{\#\text{entidades distintas con edad} = N}{\#\text{entidades distintas con edad} = 0}$"
-        "\n- **Snapshot** (una fila por entidad, antigüedad actual): "
-        r"$\text{retención}(C, N) = \dfrac{\#\text{entidades con edad} \geq N}{\#\text{entidades en la cohorte}}$"
-    )
-    st.markdown(
-        "El modo se detecta automáticamente: si el ID de entidad se repite en más de una fila, es "
-        "Evento; si cada entidad aparece una sola vez (o no hay ID de entidad), es Snapshot."
-    )
+        st.subheader("3. Modo del motor")
+        st.markdown(
+            "- **Evento** (log de actividad, varias filas por entidad): "
+            r"$\text{retención}(C, N) = \dfrac{\#\text{entidades distintas con edad} = N}{\#\text{entidades distintas con edad} = 0}$"
+            "\n- **Snapshot** (una fila por entidad, antigüedad actual): "
+            r"$\text{retención}(C, N) = \dfrac{\#\text{entidades con edad} \geq N}{\#\text{entidades en la cohorte}}$"
+        )
+        st.markdown(
+            "El modo se detecta automáticamente: si el ID de entidad se repite en más de una fila, es "
+            "Evento; si cada entidad aparece una sola vez (o no hay ID de entidad), es Snapshot."
+        )
 
-    st.subheader("4. Censura por tiempo insuficiente")
-    st.markdown(
-        "En modo Snapshot, una celda (cohorte, edad=N) se marca como **N/A** — no como 0% — cuando "
-        "la cohorte, dado su punto de arranque, todavía no pudo alcanzar calendáricamente esa edad "
-        "(por ejemplo, una cohorte de este mes no puede tener 6 meses de antigüedad todavía). Se "
-        "calcula comparando N contra la edad máxima posible = edad de la observación más reciente "
-        "del dataset menos el inicio de esa cohorte."
-    )
+        st.subheader("4. Censura por tiempo insuficiente")
+        st.markdown(
+            "En ambos modos, una celda (cohorte, edad=N) se marca como **N/A** — no como 0% — cuando "
+            "la cohorte, dado su punto de arranque, todavía no pudo alcanzar calendáricamente esa edad "
+            "(por ejemplo, una cohorte de este mes no puede tener 6 meses de antigüedad todavía). Se "
+            "calcula comparando N contra la edad máxima posible = edad de la observación más reciente "
+            "del dataset menos el inicio de esa cohorte."
+        )
 
-    st.subheader("5. Abandono y Conversión")
-    st.markdown(
-        "- **Abandono (curva)** $= 1 - \\text{retención}$, edad a edad.\n"
-        "- **Abandono / Conversión basados en estado** (si se mapea una columna de estado): cada "
-        "valor único se asigna a un bucket (Retenido, Convertido, Abandono, Pendiente, Ignorar) y se "
-        "calcula el % de entidades de la cohorte en cada bucket."
-    )
+        st.subheader("5. Abandono y Conversión")
+        st.markdown(
+            "- **Abandono (curva)** $= 1 - \\text{retención}$, edad a edad.\n"
+            "- **Abandono / Conversión basados en estado** (si se mapea una columna de estado): cada "
+            "valor único se asigna a un bucket (Retenido, Convertido, Abandono, Pendiente, Ignorar) y se "
+            "calcula el % de entidades de la cohorte en cada bucket."
+        )
 
-    st.subheader("6. Insights automáticos")
-    st.markdown(
-        "Reglas deterministas, no modelos de machine learning: ranking de cohortes por retención "
-        "promedio, pendiente de una regresión lineal simple (`numpy.polyfit`) sobre el tamaño y la "
-        "retención de cohortes sucesivas para detectar tendencias, y z-score sobre la retención "
-        "promedio de cada cohorte para marcar anomalías (|z| > 2)."
-    )
+        st.subheader("6. Insights automáticos")
+        st.markdown(
+            "Reglas deterministas, no modelos de machine learning: ranking de cohortes por retención "
+            "promedio, pendiente de una regresión lineal simple (`numpy.polyfit`) sobre el tamaño y la "
+            "retención de cohortes sucesivas para detectar tendencias, y z-score sobre la retención "
+            "promedio de cada cohorte para marcar anomalías (|z| > 2)."
+        )

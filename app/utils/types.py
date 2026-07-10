@@ -52,7 +52,7 @@ class StatusBucket(str, Enum):
 
     RETENIDO = "Retenido / Activo"
     CONVERTIDO = "Convertido"
-    ABANDONO = "Abandono / Churn"
+    ABANDONO = "Abandono"
     PENDIENTE = "Pendiente / En proceso"
     IGNORAR = "Ignorar"
 

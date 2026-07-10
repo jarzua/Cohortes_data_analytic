@@ -30,6 +30,30 @@ _AGG_FUNCS = {
     AggregationType.MINIMO: "min",
 }
 
+# Tope duro de celdas (cohortes × edades) antes de construir una matriz. Sin este límite, elegir una
+# columna numérica continua (sin agrupar) como observación, o una granularidad muy fina (Día) sobre
+# un rango de fechas amplio, produce una matriz de cientos de miles de columnas y agota la memoria.
+MAX_MATRIX_CELLS = 100_000
+
+
+class MatrixTooLargeError(ValueError):
+    """La combinación de cohorte/observación/granularidad produciría una matriz inmanejable."""
+
+
+def _check_matrix_size(tidy: pd.DataFrame) -> None:
+    n_cohorts = int(tidy["cohort_key"].nunique())
+    n_ages = int(tidy["age"].max()) + 1
+    total_cells = n_cohorts * n_ages
+    if total_cells > MAX_MATRIX_CELLS:
+        raise MatrixTooLargeError(
+            f"La configuración actual generaría una matriz de {n_cohorts:,} cohortes × {n_ages:,} "
+            f"periodos de antigüedad ({total_cells:,} celdas), demasiado grande para procesar "
+            f"(límite: {MAX_MATRIX_CELLS:,} celdas). Esto suele pasar por elegir una granularidad muy "
+            "fina (Día) sobre un rango de fechas amplio, o una columna numérica continua (no una "
+            "fecha o periodo) como columna de observación/antigüedad. Prueba con una granularidad "
+            "más amplia (Mes/Trimestre/Año) o revisa las columnas elegidas."
+        )
+
 
 def _ordered_cohorts(tidy: pd.DataFrame) -> list:
     """Cohortes ordenadas por su ancla temporal/numérica; empates se ordenan alfabéticamente."""
@@ -60,6 +84,7 @@ def build_count_matrix(tidy: pd.DataFrame, mode: EngineMode) -> pd.DataFrame:
     """Matriz cohorte×edad de entidades distintas, con la semántica correcta según el modo."""
     if tidy.empty:
         return pd.DataFrame()
+    _check_matrix_size(tidy)
     cohorts = _ordered_cohorts(tidy)
     ages = _age_range(tidy)
 
@@ -71,7 +96,10 @@ def build_count_matrix(tidy: pd.DataFrame, mode: EngineMode) -> pd.DataFrame:
     )
 
     if mode == EngineMode.EVENTO:
-        return exact
+        # Una celda (cohorte, edad) sin ninguna entidad activa es 0% de retención, no "sin dato" —
+        # pero solo para edades que la cohorte ya pudo alcanzar calendáricamente; las futuras siguen
+        # censuradas (NaN) en vez de mostrarse como 0.
+        return _apply_censoring(exact.fillna(0), tidy)
 
     # Modo snapshot: "alcanzaron la edad N" = acumulado desde la edad máxima hacia atrás.
     reached = exact.fillna(0).iloc[:, ::-1].cumsum(axis=1).iloc[:, ::-1]
@@ -82,6 +110,7 @@ def build_metric_matrix(tidy: pd.DataFrame, aggregation: AggregationType) -> pd.
     """Matriz cohorte×edad de la métrica seleccionada, agregada con la función elegida."""
     if tidy.empty or "metric_value" not in tidy.columns:
         return pd.DataFrame()
+    _check_matrix_size(tidy)
     cohorts = _ordered_cohorts(tidy)
     ages = _age_range(tidy)
     agg_func = _AGG_FUNCS[aggregation]
@@ -124,24 +153,41 @@ def churn_matrix(tidy: pd.DataFrame, mode: EngineMode) -> pd.DataFrame:
     return 1 - retention
 
 
+def _latest_status_per_entity(tidy: pd.DataFrame) -> pd.DataFrame:
+    """Reduce la tabla tidy a una fila por entidad, con su cohorte y su ÚLTIMO estado observado.
+
+    En modo evento una misma entidad puede aparecer en varias filas con estados distintos a lo largo
+    del tiempo (ej. Activo -> Abandono). Sin esta reducción, `status_summary` contaría a la misma
+    entidad en más de un bucket a la vez, inflando los denominadores de conversión/abandono. En modo
+    snapshot (una fila por entidad) esto es un no-op.
+    """
+    ordered = tidy.sort_values("observation_ordinal", kind="mergesort")
+    return ordered.drop_duplicates(subset="entity_id", keep="last")[["entity_id", "cohort_key", "status_bucket"]]
+
+
 def status_summary(tidy: pd.DataFrame) -> pd.DataFrame:
-    """Tabla cohorte × bucket de estado con conteo de entidades distintas."""
+    """Tabla cohorte × bucket de estado con conteo de entidades distintas (una por entidad)."""
     if "status_bucket" not in tidy.columns:
         return pd.DataFrame()
+    latest = _latest_status_per_entity(tidy)
     return (
-        tidy.groupby(["cohort_key", "status_bucket"])["entity_id"]
+        latest.groupby(["cohort_key", "status_bucket"])["entity_id"]
         .nunique()
         .unstack("status_bucket")
         .fillna(0)
     )
 
 
-def conversion_rates(tidy: pd.DataFrame) -> pd.Series:
-    """% de entidades por cohorte cuyo estado mapea a Convertido o Retenido/Activo."""
-    counts = status_summary(tidy)
-    if counts.empty:
+def conversion_rates(status_counts: pd.DataFrame) -> pd.Series:
+    """% de entidades por cohorte cuyo estado mapea a Convertido o Retenido/Activo.
+
+    Recibe el resultado de `status_summary(tidy)` ya calculado (en vez de `tidy` crudo) para que
+    `conversion_rates` y `abandono_rates` no dupliquen la misma reducción a último-estado-por-entidad
+    cuando se necesitan ambas junto con la tabla de resumen (caso típico en `app.py`).
+    """
+    if status_counts.empty:
         return pd.Series(dtype=float)
-    counts = counts.drop(columns=[StatusBucket.IGNORAR.value], errors="ignore")
+    counts = status_counts.drop(columns=[StatusBucket.IGNORAR.value], errors="ignore")
     total = counts.sum(axis=1)
     converted_cols = [c for c in (StatusBucket.CONVERTIDO.value, StatusBucket.RETENIDO.value) if c in counts.columns]
     converted = counts[converted_cols].sum(axis=1) if converted_cols else pd.Series(0.0, index=counts.index)
@@ -149,12 +195,11 @@ def conversion_rates(tidy: pd.DataFrame) -> pd.Series:
         return (converted / total).replace([np.inf, -np.inf], np.nan)
 
 
-def abandono_rates(tidy: pd.DataFrame) -> pd.Series:
-    """% de entidades por cohorte cuyo estado mapea a Abandono/Churn."""
-    counts = status_summary(tidy)
-    if counts.empty:
+def abandono_rates(status_counts: pd.DataFrame) -> pd.Series:
+    """% de entidades por cohorte cuyo estado mapea a Abandono/Churn. Recibe `status_summary(tidy)`."""
+    if status_counts.empty:
         return pd.Series(dtype=float)
-    counts = counts.drop(columns=[StatusBucket.IGNORAR.value], errors="ignore")
+    counts = status_counts.drop(columns=[StatusBucket.IGNORAR.value], errors="ignore")
     total = counts.sum(axis=1)
     abandono_col = StatusBucket.ABANDONO.value
     abandono = counts[abandono_col] if abandono_col in counts.columns else pd.Series(0.0, index=counts.index)
@@ -174,7 +219,7 @@ def executive_kpis(tidy: pd.DataFrame, mode: EngineMode) -> dict:
     avg_abandono = 1 - avg_retention if not np.isnan(avg_retention) else float("nan")
 
     return {
-        "total_registros": int(tidy["entity_id"].nunique()),
+        "total_entidades": int(tidy["entity_id"].nunique()),
         "cohortes_activas": int(len(counts.index)) if not counts.empty else 0,
         "retencion_promedio": avg_retention,
         "abandono_promedio": avg_abandono,

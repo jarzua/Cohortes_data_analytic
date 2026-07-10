@@ -7,6 +7,7 @@ fila automáticamente en vez de asumir `header=0`, para que el motor funcione co
 
 from __future__ import annotations
 
+import csv
 from typing import BinaryIO, Optional, Union
 
 import pandas as pd
@@ -14,6 +15,7 @@ import pandas as pd
 FileLike = Union[str, BinaryIO]
 
 MAX_HEADER_SCAN_ROWS = 15
+_PLAUSIBLE_SEPARATORS = ",;\t|:"
 
 
 def is_excel(filename: str) -> bool:
@@ -90,26 +92,65 @@ def load_excel(file: FileLike, sheet_name: Optional[str] = None) -> pd.DataFrame
     return _clean_dataframe(df)
 
 
+def _read_raw_bytes(file: FileLike) -> bytes:
+    """Lee el contenido completo del archivo como bytes, sin consumir el stream para lecturas
+    posteriores (deja el cursor en 0 si `file` es un objeto tipo archivo)."""
+    if hasattr(file, "read"):
+        file.seek(0)
+        data = file.read()
+        file.seek(0)
+        return data
+    with open(file, "rb") as f:
+        return f.read()
+
+
+def _detect_separator(sample_text: str) -> str:
+    """Detecta el separador de un CSV con `csv.Sniffer`, restringido a delimitadores plausibles
+    (`,` `;` tab `|` `:`).
+
+    Sin esta restricción, un CSV de una sola columna (sin ningún delimitador real que detectar,
+    ej. una lista de IDs o nombres) hace que `csv.Sniffer` elija un carácter cualquiera del propio
+    contenido como si fuera el separador — partiendo los datos en columnas falsas de forma
+    silenciosa. Si ningún delimitador plausible aparece de forma consistente, se usa ',' por
+    defecto, que no tiene efecto si nunca aparece en los datos (columna única preservada tal cual).
+    """
+    try:
+        dialect = csv.Sniffer().sniff(sample_text, delimiters=_PLAUSIBLE_SEPARATORS)
+        return dialect.delimiter
+    except csv.Error:
+        return ","
+
+
 def load_csv(file: FileLike) -> pd.DataFrame:
-    """Carga un CSV probando codificaciones comunes, auto-detectando el separador y la fila de
-    encabezado real (un CSV exportado desde Excel puede conservar las mismas filas de título/banner
-    que un .xlsx, así que no se puede asumir `header=0`)."""
+    """Carga un CSV probando codificaciones comunes, detectando el separador de forma acotada (ver
+    `_detect_separator`) y la fila de encabezado real (un CSV exportado desde Excel puede conservar
+    las mismas filas de título/banner que un .xlsx, así que no se puede asumir `header=0`)."""
+    raw_bytes = _read_raw_bytes(file)
+    if not raw_bytes.strip():
+        raise ValueError("El archivo CSV está vacío.")
+
     encodings = ["utf-8", "utf-8-sig", "latin-1", "cp1252"]
     last_error: Exception | None = None
     for encoding in encodings:
         try:
+            sample = raw_bytes[:8192].decode(encoding)
+            sep = _detect_separator(sample)
+
             if hasattr(file, "seek"):
                 file.seek(0)
-            raw = pd.read_csv(
-                file, sep=None, engine="python", encoding=encoding, header=None, nrows=MAX_HEADER_SCAN_ROWS
-            )
+            raw = pd.read_csv(file, sep=sep, encoding=encoding, header=None, nrows=MAX_HEADER_SCAN_ROWS)
             header_row = _detect_header_row(raw)
 
             if hasattr(file, "seek"):
                 file.seek(0)
-            df = pd.read_csv(file, sep=None, engine="python", encoding=encoding, header=header_row)
+            df = pd.read_csv(file, sep=sep, encoding=encoding, header=header_row)
+            if df.empty or df.shape[1] == 0:
+                raise pd.errors.EmptyDataError("El CSV no contiene columnas legibles.")
             return _clean_dataframe(df)
-        except (UnicodeDecodeError, pd.errors.ParserError) as exc:
+        except UnicodeDecodeError as exc:
+            last_error = exc
+            continue
+        except (pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
             last_error = exc
             continue
     raise ValueError(f"No se pudo leer el CSV con ninguna codificación soportada: {last_error}")

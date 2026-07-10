@@ -144,15 +144,41 @@ def compute_cohort_table(
                 "La columna de observación/antigüedad debe ser de tipo fecha, numérica o periodo "
                 "ordinal (no una categoría nominal sin orden)."
             )
+
+        # Si la cohorte ya tiene su propia escala ordinal (fecha, o periodo/numérica "nativa"), la
+        # observación debe compartir esa misma escala: restar un ordinal de fecha contra un valor
+        # numérico crudo (o viceversa) produce antigüedades sin sentido, aunque ambos tipos sean
+        # individualmente válidos. Ver `core.compatibility.compatible_observation_types`.
+        if own_ordinal is not None:
+            cohort_family = ColumnType.FECHA if cohort_type == ColumnType.FECHA else "nativo"
+            obs_family = ColumnType.FECHA if obs_type == ColumnType.FECHA else "nativo"
+            if cohort_family != obs_family:
+                raise ValueError(
+                    f"La columna de cohorte ('{cohort_col}') y la de observación ('{obs_col}') usan "
+                    "escalas incompatibles (fecha vs. numérica/periodo): la antigüedad resultante no "
+                    "tendría significado. Elige una columna de observación del mismo tipo (ambas "
+                    "fecha, o ambas numérica/periodo)."
+                )
         result["observation_ordinal"] = obs_ordinal
 
-        # El "origen" de la cohorte siempre se ancla por ENTIDAD (su primera aparición), no por la
-        # fila individual: esto es lo que hace que "misma columna como cohorte y observación" (el
-        # caso clásico: cohorte = mes de primer evento, edad = meses desde ese primer evento)
-        # produzca antigüedad creciente en vez de 0 siempre. Si no hay `entity_id_column`, cada fila
-        # es su propia "entidad" (sin repeticiones) y el mínimo por grupo no cambia nada.
+        # El "origen" de la cohorte se ancla por ENTIDAD (su primera aparición), no por la fila
+        # individual: esto es lo que hace que "misma columna como cohorte y observación" (el caso
+        # clásico: cohorte = mes de primer evento, edad = meses desde ese primer evento) produzca
+        # antigüedad creciente en vez de 0 siempre.
+        #
+        # Si NO hay `entity_id_column` y la cohorte es nominal (own_ordinal es None, ej. Ciudad), no
+        # existe ninguna entidad real que rastrear: cada fila sería "su propia entidad" y, al no
+        # repetirse nunca, el mínimo por fila sería siempre el valor de la propia fila -> edad = 0
+        # para todo el mundo. En ese caso concreto se ancla por `cohort_key` (el grupo completo)
+        # en su lugar, usando la primera observación del segmento como origen. Con ID de entidad, o
+        # con una cohorte que ya tiene su propia escala ordinal, se ancla por entidad como siempre.
+        if config.entity_id_column or own_ordinal is not None:
+            anchor_group = result["entity_id"]
+        else:
+            anchor_group = result["cohort_key"]
+
         source_ordinal = own_ordinal if own_ordinal is not None else obs_ordinal
-        cohort_start = source_ordinal.groupby(result["entity_id"]).transform("min")
+        cohort_start = source_ordinal.groupby(anchor_group).transform("min")
         result["cohort_start_ordinal"] = cohort_start
         result["age"] = obs_ordinal - cohort_start
 

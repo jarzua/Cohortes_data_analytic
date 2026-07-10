@@ -56,6 +56,10 @@ def _parses_as_date(series: pd.Series) -> bool:
 def infer_column_types(df: pd.DataFrame) -> dict[str, ColumnType]:
     """Clasifica cada columna del dataset en un `ColumnType`."""
     n_rows = len(df)
+    # Piso absoluto de unicidad para considerar "identificador", pero escalado hacia abajo en
+    # datasets pequeños: en un archivo de 40 filas, una columna de ID 100% única (40/40) nunca
+    # superaría un piso fijo de 50 y quedaría mal clasificada como categórica.
+    identifier_min_unique = min(IDENTIFIER_MIN_UNIQUE, max(5, n_rows // 2))
     types: dict[str, ColumnType] = {}
     for col in df.columns:
         series = df[col]
@@ -83,7 +87,7 @@ def infer_column_types(df: pd.DataFrame) -> dict[str, ColumnType]:
             continue
 
         unique_ratio = (n_unique / n_rows) if n_rows else 0.0
-        if unique_ratio >= IDENTIFIER_UNIQUE_RATIO and n_unique > IDENTIFIER_MIN_UNIQUE:
+        if unique_ratio >= IDENTIFIER_UNIQUE_RATIO and n_unique > identifier_min_unique:
             types[col] = ColumnType.IDENTIFICADOR
         else:
             types[col] = ColumnType.CATEGORICO
@@ -151,7 +155,11 @@ def descriptive_stats(df: pd.DataFrame, types: dict[str, ColumnType]) -> pd.Data
     ]
     if not numeric_cols:
         return pd.DataFrame()
-    stats = df[numeric_cols].describe().T
+    # Las columnas NUMERICO_CATEGORICO ya están en dtype `category` (ver coerce_column_types) para
+    # acelerar groupby; `.describe()` sin este cast las excluiría por completo en vez de calcular
+    # sus estadísticas, porque pandas trata `category` como no-numérico aunque sus valores lo sean.
+    numeric_df = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+    stats = numeric_df.describe().T
     stats = stats.rename(
         columns={
             "count": "Conteo",
