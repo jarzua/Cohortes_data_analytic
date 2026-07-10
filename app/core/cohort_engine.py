@@ -209,4 +209,28 @@ def compute_cohort_table(
     # Antigüedad negativa (observación anterior al arranque de la cohorte) indica inconsistencia de
     # datos: se descarta en vez de distorsionar la matriz con columnas de "edad" sin sentido.
     result = result[result["age"] >= 0]
+
+    if config.cohort_label_column:
+        # Reemplaza la etiqueta de cohorte por una columna más legible (ej. "Periodo de Ingreso" en
+        # vez de "Semestre Ingreso") SOLO para mostrar — el cálculo de antigüedad ya se hizo arriba
+        # con la columna de cohorte real y no se toca. Se usa el valor más frecuente de la columna de
+        # etiqueta dentro de cada cohorte, por si no fuera perfectamente constante en los datos.
+        labels = df.loc[result.index, config.cohort_label_column].astype(str)
+        label_lookup = (
+            pd.DataFrame({"cohort_key": result["cohort_key"].values, "label": labels.values})
+            .groupby("cohort_key")["label"]
+            .agg(lambda s: s.mode().iat[0])
+        )
+        # Si dos cohortes reales distintas mapean a la misma etiqueta, remapear las fusionaría en una
+        # sola fila de la matriz sin avisar -- mejor rechazar que corromper el resultado en silencio.
+        colliding = label_lookup[label_lookup.duplicated(keep=False)]
+        if not colliding.empty:
+            raise ValueError(
+                f"La columna de etiqueta ('{config.cohort_label_column}') no identifica de forma "
+                f"única a cada cohorte de '{cohort_col}': varias cohortes distintas comparten la "
+                f"misma etiqueta (ej. '{colliding.iloc[0]}'). Elige una columna que sea constante "
+                "dentro de cada cohorte pero distinta entre cohortes."
+            )
+        result["cohort_key"] = result["cohort_key"].map(label_lookup)
+
     return result

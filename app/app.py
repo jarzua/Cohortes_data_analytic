@@ -25,7 +25,7 @@ from utils.types import (
 
 st.set_page_config(page_title="Motor Universal de Cohortes", page_icon="📊", layout="wide")
 
-SHOW_METHODOLOGY_TAB = False  # oculta temporalmente la pestaña "📐 Metodología"; el contenido queda intacto más abajo
+SHOW_METHODOLOGY_TAB = True
 
 NONE_LABEL = "(Ninguno)"
 COHORT_COLUMN_TYPES = (
@@ -177,6 +177,18 @@ if selected_view == "⚙️ Configuración":
     )
     cohort_type = types[cohort_column]
 
+    label_options = [NONE_LABEL] + [
+        c for c in df.columns if c != cohort_column and types[c] != ColumnType.IDENTIFICADOR
+    ]
+    cohort_label_column = st.selectbox(
+        "Etiqueta de Cohorte para mostrar (opcional)",
+        options=label_options,
+        help="No afecta el cálculo de antigüedad, solo el texto que se muestra en las filas de la "
+        "matriz. Útil cuando la columna de cohorte correcta para el cálculo (ej. 'Semestre Ingreso') "
+        "no es la más legible: aquí puedes mapear una columna más descriptiva (ej. 'Periodo de "
+        "Ingreso') que sea constante dentro de cada cohorte.",
+    )
+
     c1, c2 = st.columns(2)
     with c1:
         compatible_types = compatibility.compatible_observation_types(cohort_type)
@@ -306,6 +318,7 @@ if selected_view == "⚙️ Configuración":
                 metric_column=None if metric_column == NONE_LABEL else metric_column,
                 aggregation=aggregation,
                 engine_mode_override=mode_override,
+                cohort_label_column=None if cohort_label_column == NONE_LABEL else cohort_label_column,
             )
             try:
                 tidy = cohort_engine.compute_cohort_table(filtered_df, types, config)
@@ -380,8 +393,9 @@ if selected_view == "🔢 Matriz de Cohortes":
         is_pct = view_map[view_label] != MatrixView.ABSOLUTO
 
         st.dataframe(
-            display_matrix.style.format(lambda v: format_pct(v) if is_pct else format_number(v))
-            .background_gradient(cmap="Blues", axis=None),
+            display_matrix.style.format(
+                lambda v: format_pct(v, empty="-") if is_pct else format_number(v, empty="-")
+            ).background_gradient(cmap="Blues", axis=None),
             use_container_width=True,
         )
         st.plotly_chart(
@@ -469,56 +483,171 @@ if selected_view == "🧠 Insights":
 # Vista: Metodología (oculta temporalmente, ver SHOW_METHODOLOGY_TAB)
 # ---------------------------------------------------------------------------
 if SHOW_METHODOLOGY_TAB and selected_view == "📐 Metodología":
-    st.header("Metodología: cómo se calcula cada número")
-
-    st.subheader("1. Asignación de cohorte")
-    st.markdown(
-        "- **Columna de fecha**: se trunca a la granularidad elegida "
-        "(día, semana, mes, trimestre, semestre o año).\n"
-        "- **Columna de periodo** (ej. `2025-2`) o **numérica categórica** (ej. Semestre): se usa "
-        "el valor directamente, con un orden numérico inferido automáticamente.\n"
-        "- **Columna categórica** (ej. Ciudad): se usa el valor tal cual, sin orden temporal propio."
+    st.header("📐 Metodología: cómo leer y configurar el análisis")
+    st.caption(
+        "Explicación práctica, no solo matemática: qué significa cada número y cómo elegir bien "
+        "cada columna en la pestaña ⚙️ Configuración."
     )
 
-    st.subheader("2. Antigüedad (edad de la cohorte)")
-    st.latex(r"\text{edad} = \text{ordinal}(\text{observación}) - \text{ordinal}(\text{inicio de la entidad})")
+    # -----------------------------------------------------------------------
+    st.subheader("1. ¿Qué es una matriz de cohortes, en la práctica?")
     st.markdown(
-        "El inicio de cada **entidad** es el mínimo valor ordinal alcanzado en cualquiera de sus "
-        "filas (su primera aparición), no el valor de cada fila individual — así una misma entidad "
-        "permanece en su cohorte de origen a lo largo de toda su historia. Si no hay columna de "
-        "observación, la edad es 0 para todos los registros (comparación estática, sin evolución)."
+        "Imagina que en enero inscribiste 100 estudiantes. Un mes después, 80 seguían activos. Dos "
+        "meses después, 65. Eso ya es una cohorte con su curva de retención: **100 → 80 → 65**.\n\n"
+        "La matriz de cohortes hace exactamente eso, pero para **todas** las camadas de estudiantes "
+        "(enero, febrero, marzo...) al mismo tiempo, una debajo de la otra, para poder comparar: "
+        "¿la cohorte de marzo retiene mejor o peor que la de enero a los 2 meses?"
+    )
+    st.markdown(
+        "|  | Edad 0 | Edad 1 | Edad 2 |\n"
+        "|---|---|---|---|\n"
+        "| Cohorte Enero | 100 | 80 | 65 |\n"
+        "| Cohorte Febrero | 120 | 90 | - |\n"
+        "| Cohorte Marzo | 95 | 70 | - |\n"
+    )
+    st.caption(
+        "Los `-` en Febrero y Marzo no son error ni ceros: esas cohortes **todavía no han vivido** "
+        "esa antigüedad en el calendario real (ver punto 6)."
     )
 
-    st.subheader("3. Modo del motor")
+    # -----------------------------------------------------------------------
+    st.subheader("2. Los roles que configuras, explicados uno por uno")
+
+    st.markdown("**🗂️ Columna de Cohorte** — responde: *¿a qué grupo pertenece cada registro?*")
     st.markdown(
-        "- **Evento** (log de actividad, varias filas por entidad): "
-        r"$\text{retención}(C, N) = \dfrac{\#\text{entidades distintas con edad} = N}{\#\text{entidades distintas con edad} = 0}$"
-        "\n- **Snapshot** (una fila por entidad, antigüedad actual): "
-        r"$\text{retención}(C, N) = \dfrac{\#\text{entidades con edad} \geq N}{\#\text{entidades en la cohorte}}$"
-    )
-    st.markdown(
-        "El modo se detecta automáticamente: si el ID de entidad se repite en más de una fila, es "
-        "Evento; si cada entidad aparece una sola vez (o no hay ID de entidad), es Snapshot."
+        "- Úsala con una **fecha** (ej. Fecha de Inscripción) cuando quieras agrupar por *cuándo* "
+        "llegó cada quien — el caso más común.\n"
+        "- Úsala con una **categoría** (ej. Ciudad, Canal de Captación, Programa) cuando quieras "
+        "comparar *segmentos* en vez de momentos en el tiempo.\n"
+        "- 💡 *Pista para reconocerla en tu archivo*: es la columna con la que responderías "
+        "\"¿de qué grupo/mes/canal es esta persona?\"."
     )
 
-    st.subheader("4. Censura por tiempo insuficiente")
+    st.markdown("**📈 Columna de Observación / Antigüedad** — responde: *¿cuánto tiempo ha pasado?*")
     st.markdown(
-        "En ambos modos, una celda (cohorte, edad=N) se marca como **N/A** — no como 0% — cuando "
-        "la cohorte, dado su punto de arranque, todavía no pudo alcanzar calendáricamente esa edad "
-        "(por ejemplo, una cohorte de este mes no puede tener 6 meses de antigüedad todavía). Se "
-        "calcula comparando N contra la edad máxima posible = edad de la observación más reciente "
-        "del dataset menos el inicio de esa cohorte."
+        "- Debe ser otra fecha, u otro contador de periodo, que se pueda **restar** de la Columna "
+        "de Cohorte (por eso la app solo te deja elegir columnas de la misma \"familia\" — ver el "
+        "punto 3).\n"
+        "- Si la omites, no hay evolución: solo comparas los grupos en un instante fijo (sin curva).\n"
+        "- 💡 *Pista*: si tu archivo ya trae una columna tipo \"Semestre Actual\" o \"Mes desde "
+        "ingreso\", esa es tu columna de observación casi siempre."
     )
 
-    st.subheader("5. Abandono y Conversión")
+    st.markdown("**🆔 Columna de ID de Entidad** — responde: *quién es quién, a través del tiempo*")
     st.markdown(
-        "- **Abandono (curva)** $= 1 - \\text{retención}$, edad a edad.\n"
-        "- **Abandono / Conversión basados en estado** (si se mapea una columna de estado): cada "
-        "valor único se asigna a un bucket (Retenido, Convertido, Abandono, Pendiente, Ignorar) y se "
-        "calcula el % de entidades de la cohorte en cada bucket."
+        "- Documento, cédula, código de estudiante, email — cualquier identificador único y "
+        "repetible de la misma persona/cliente.\n"
+        "- Sin ella, la retención se cuenta por **filas**, no por personas distintas — sigue "
+        "funcionando, pero es menos preciso si una misma persona puede aparecer varias veces.\n"
+        "- 💡 *Pista*: la app ya la sugiere sola cuando detecta una columna con valores 100% únicos."
     )
 
-    st.subheader("6. Insights automáticos")
+    st.markdown("**🚦 Columna de Estado** — responde: *sigue activo, se graduó o abandonó?*")
+    st.markdown(
+        "- Ej. \"Matriculado\", \"Desertor\", \"Graduado\". Permite calcular Abandono/Conversión "
+        "sobre el **estado real** de cada persona, no solo sobre si aparece o no en los datos.\n"
+        "- Tras elegirla, mapeas cada valor único a un bucket (Retenido, Abandono, Convertido, "
+        "Pendiente) — la app te sugiere un mapeo automático por palabras clave, revísalo igual.\n"
+        "- 💡 *Pista*: si no tienes esta columna, la app sigue midiendo retención por presencia/"
+        "ausencia en los datos, sin este nivel de detalle."
+    )
+
+    st.markdown("**🔢 Columna de Métrica** — responde: *además de contar personas, quiero sumar algo*")
+    st.markdown(
+        "- Cualquier columna numérica: ingresos, costos, NPS, edad promedio. Se combina con una "
+        "función de agregación (Suma, Promedio, Mediana, Máximo, Mínimo).\n"
+        "- Es opcional: sin ella, la matriz simplemente cuenta entidades."
+    )
+
+    # -----------------------------------------------------------------------
+    st.subheader("3. Glosario: qué significa el \"Tipo detectado\" en la pestaña 📂 Datos")
+    st.markdown(
+        "La app detecta el tipo de cada columna automáticamente (nunca por el nombre, solo por su "
+        "contenido), y de ahí depende qué rol puede cumplir:"
+    )
+    st.markdown(
+        "| Tipo detectado | Qué significa en la práctica | Para qué sirve |\n"
+        "|---|---|---|\n"
+        "| `fecha` | Fechas reales (día/mes/año) | Cohorte u Observación — el caso clásico |\n"
+        "| `periodo_ordinal` | Texto tipo \"2025-2\" (año-semestre/trimestre) | Cohorte u Observación, si ambas son del mismo formato |\n"
+        "| `numerico_categorico` | Número con pocos valores repetidos (ej. Semestre 1-10, Estrato) | Cohorte, Observación, Filtro o Métrica |\n"
+        "| `numerico_continuo` | Número con muchos valores distintos (ej. Ingresos, Edad) | Métrica o Observación (no Cohorte ni Filtro) |\n"
+        "| `categorico` | Texto repetido (ej. Ciudad, Programa) | Cohorte, Estado o Filtro |\n"
+        "| `identificador` | Texto único por fila (documento, email) | ID de Entidad — nunca Cohorte ni Métrica |\n"
+        "| `booleano` | Verdadero/Falso | Cohorte, Estado o Filtro |\n"
+    )
+    st.info(
+        "**Regla rápida**: si una columna es `identificador`, es tu ID de entidad. Si es `fecha` o "
+        "`periodo_ordinal`, es tu mejor candidata a Cohorte u Observación. Si es `numerico_continuo`, "
+        "úsala como Métrica, no como Cohorte (números casi todos distintos no agrupan nada)."
+    )
+
+    # -----------------------------------------------------------------------
+    st.subheader("4. Cómo se calcula la antigüedad, con números reales")
+    st.markdown(
+        "Ejemplo: una estudiante se inscribió en **Marzo 2025** (su cohorte) y hoy está en el "
+        "periodo **Junio 2025** (su observación). Con granularidad Mes:"
+    )
+    st.latex(r"\text{antigüedad} = \text{ordinal(Junio)} - \text{ordinal(Marzo)} = 3 \text{ meses}")
+    st.markdown(
+        "El \"inicio\" siempre se toma como la primera aparición de **esa misma entidad** (no de la "
+        "fila), así que si más adelante esa estudiante tiene otro registro en Julio, su antigüedad "
+        "en esa fila es 4, no 0 — sigue perteneciendo a su cohorte de Marzo."
+    )
+
+    # -----------------------------------------------------------------------
+    st.subheader("5. ¿Evento o Snapshot? Pregúntate: ¿mis filas son personas o son eventos?")
+    st.markdown(
+        "- **Snapshot** (detectado automáticamente si cada entidad aparece **una sola vez**): tu "
+        "archivo es una foto actual — una fila por estudiante con su antigüedad de hoy. Es el caso "
+        "más común en reportes de matrícula/CRM exportados directamente.\n"
+        "- **Evento** (si el ID de entidad se repite en varias filas): tu archivo es un historial — "
+        "cada fila es una actividad (login, compra, pago) en un momento distinto de la misma persona.\n\n"
+        "No necesitas elegirlo tú: la app lo detecta sola. Solo fuerza el modo manualmente si sabes "
+        "que tus datos son ambiguos (por ejemplo, pocas personas con eventos repetidos por error)."
+    )
+
+    # -----------------------------------------------------------------------
+    st.subheader("6. Por qué algunas celdas muestran \"-\" en vez de 0%")
+    st.markdown(
+        "Una cohorte de **este mes** no puede tener \"6 meses de antigüedad\" todavía — no es que "
+        "hayan abandonado, es que ese futuro **aún no ha ocurrido** en el calendario. La app "
+        "distingue esto automáticamente: `-` significa \"todavía no aplica\", `0%` significa "
+        "\"ya pudo pasar, y no pasó\". Confundir ambas cosas es el error más común al leer una "
+        "matriz de cohortes a mano — aquí no hace falta, la app ya lo separa por ti."
+    )
+
+    # -----------------------------------------------------------------------
+    st.subheader("7. Retención, Abandono y Conversión — la diferencia práctica")
+    st.markdown(
+        "- **Retención**: de los que empezaron, ¿qué % sigue ahí en la edad N? Es la métrica base "
+        "de toda la matriz.\n"
+        "- **Abandono** = 1 − Retención, edad por edad — la misma información, leída al revés.\n"
+        "- **Conversión / Abandono basados en Estado**: en vez de solo mirar si la persona *aparece* "
+        "en los datos, mira su **estado real** más reciente (Matriculado, Desertor, Graduado...) — "
+        "más preciso si tienes esa columna, porque alguien puede seguir \"apareciendo\" en los datos "
+        "sin realmente seguir activo."
+    )
+
+    # -----------------------------------------------------------------------
+    st.subheader("8. Guía rápida: combinaciones típicas que funcionan")
+    st.markdown(
+        "- **Cohortes de calendario** (la más habitual): Cohorte = una fecha (ej. Fecha de "
+        "Inscripción) + Observación = otra fecha (ej. Fecha de Matrícula), con Granularidad = Mes "
+        "o Semestre.\n"
+        "- **Cohortes por avance ya calculado**: Cohorte = un contador (ej. Semestre de Ingreso) + "
+        "Observación = otro contador de la misma escala (ej. Semestre Actual) — sin granularidad, "
+        "la resta ya está en unidades correctas.\n"
+        "- **Segmentación pura**: Cohorte = una categoría (ej. Ciudad, Canal de Captación) sin "
+        "Observación — compara segmentos en un instante, sin curva de tiempo.\n"
+    )
+    st.warning(
+        "⚠️ No mezcles una fecha con un contador ya calculado (ej. Fecha de Inscripción como "
+        "Cohorte + Semestre Actual como Observación): son escalas distintas y la app lo rechaza "
+        "con un mensaje claro en vez de dar un resultado sin sentido."
+    )
+
+    st.subheader("9. Insights automáticos")
     st.markdown(
         "Reglas deterministas, no modelos de machine learning: ranking de cohortes por retención "
         "promedio, pendiente de una regresión lineal simple (`numpy.polyfit`) sobre el tamaño y la "

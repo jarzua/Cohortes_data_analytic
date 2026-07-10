@@ -100,6 +100,7 @@ class CohortConfig:
     metric_column: str | None = None
     aggregation: AggregationType = AggregationType.CONTEO
     engine_mode_override: EngineMode | None = None
+    cohort_label_column: str | None = None
     filters: dict = field(default_factory=dict)
 
     def cache_key(self) -> tuple:
@@ -120,5 +121,6 @@ class CohortConfig:
             self.metric_column,
             self.aggregation.value,
             self.engine_mode_override.value if self.engine_mode_override else None,
+            self.cohort_label_column,
             filters_key,
         )

@@ -34,7 +34,7 @@ def heatmap_figure(matrix: pd.DataFrame, title: str, as_percentage: bool) -> go.
         return go.Figure()
     z = matrix.values
     text = [
-        [("" if pd.isna(v) else (f"{v * 100:.0f}%" if as_percentage else f"{v:,.0f}")) for v in row]
+        [("-" if pd.isna(v) else (f"{v * 100:.0f}%" if as_percentage else f"{v:,.0f}")) for v in row]
         for row in z
     ]
     hover = "%{y} · edad %{x}<br>Valor: %{text}<extra></extra>"
